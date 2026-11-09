@@ -69,6 +69,8 @@ export const SellerPortal: React.FC<SellerPortalProps> = ({
   const [showNewModal, setShowNewModal] = useState(openNewModalInitially);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+  const [modalError, setModalError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   // New Item Form State (Realistic Handmade Price Range)
   const [newTitle, setNewTitle] = useState('');
@@ -148,64 +150,119 @@ export const SellerPortal: React.FC<SellerPortalProps> = ({
   };
 
   const saveRowEdit = async (itemId: string) => {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (idTokenInMemory) headers.Authorization = `Bearer ${idTokenInMemory}`;
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (idTokenInMemory) headers.Authorization = `Bearer ${idTokenInMemory}`;
 
-    const res = await fetch(`/api/seller/items/${encodeURIComponent(itemId)}`, {
-      method: 'PATCH',
-      headers,
-      body: JSON.stringify({
-        askingPrice: Number(editDraft.askingPrice),
-        floorPrice: Number(editDraft.floorPrice),
-        stock: Number(editDraft.stock),
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setFormError(data.error || 'Could not update item.');
-      return;
+      const res = await fetch(`/api/seller/items/${encodeURIComponent(itemId)}`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({
+          askingPrice: Number(editDraft.askingPrice),
+          floorPrice: Number(editDraft.floorPrice),
+          stock: Number(editDraft.stock),
+        }),
+      });
+      let data: any = null;
+      try {
+        data = await res.json();
+      } catch {
+        // Ignored
+      }
+      if (!res.ok) {
+        setFormError(data?.error || 'Could not update item pricing.');
+        return;
+      }
+      setEditingRowId(null);
+      setStatusNotice(`Updated pricing for "${data.item.title}".`);
+      fetchDashboard();
+      onCatalogMutated();
+    } catch {
+      setFormError('Failed to connect to the server to update pricing.');
     }
-    setEditingRowId(null);
-    setStatusNotice(`Updated pricing for "${data.item.title}".`);
-    fetchDashboard();
-    onCatalogMutated();
   };
 
   const handleCreateItem = async (e: React.FormEvent) => {
     e.preventDefault();
+    setModalError(null);
     setFormError(null);
 
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (idTokenInMemory) headers.Authorization = `Bearer ${idTokenInMemory}`;
-
-    const res = await fetch('/api/seller/items', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        title: newTitle,
-        sellerName: newSellerName,
-        origin: newOrigin,
-        category: newCategory,
-        askingPrice: Number(newAskingPrice),
-        floorPrice: Number(newFloorPrice),
-        stock: Number(newStock),
-        description: newDescription,
-        concessions: newConcessions,
-        imageUrl: newImageUrl,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) {
-      setFormError(data.error || 'Please check your item inputs.');
+    // Client-side quick validations
+    if (!newTitle.trim() || newTitle.trim().length < 3) {
+      setModalError('Please enter a product title with at least 3 characters.');
       return;
     }
 
-    setShowNewModal(false);
-    setNewTitle('');
-    setNewDescription('');
-    setStatusNotice(`Added "${data.item.title}" to the live store.`);
-    fetchDashboard();
-    onCatalogMutated();
+    const asking = Number(newAskingPrice);
+    const floor = Number(newFloorPrice);
+    const stock = Number(newStock);
+
+    if (!Number.isFinite(asking) || asking <= 0) {
+      setModalError('Asking price must be a valid dollar amount greater than 0.');
+      return;
+    }
+    if (!Number.isFinite(floor) || floor <= 0) {
+      setModalError('Secret floor price must be a valid dollar amount greater than 0.');
+      return;
+    }
+    if (floor > asking) {
+      setModalError(`Secret floor price ($${floor}) cannot exceed asking price ($${asking}).`);
+      return;
+    }
+    if (!Number.isFinite(stock) || stock < 0) {
+      setModalError('Stock must be 0 or more units.');
+      return;
+    }
+
+    setSubmitting(true);
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (idTokenInMemory) headers.Authorization = `Bearer ${idTokenInMemory}`;
+
+      const res = await fetch('/api/seller/items', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          title: newTitle.trim(),
+          sellerName: newSellerName.trim(),
+          origin: newOrigin.trim(),
+          category: newCategory,
+          askingPrice: asking,
+          floorPrice: floor,
+          stock: stock,
+          description: newDescription.trim(),
+          concessions: newConcessions,
+          imageUrl: newImageUrl,
+        }),
+      });
+
+      let data: any = null;
+      try {
+        data = await res.json();
+      } catch {
+        // Non-JSON response
+      }
+
+      if (!res.ok) {
+        setModalError(
+          data?.error || `Unable to publish item (status ${res.status}). Please check inputs.`
+        );
+        return;
+      }
+
+      setShowNewModal(false);
+      setModalError(null);
+      setNewTitle('');
+      setNewDescription('');
+      setStatusNotice(`Published "${data.item.title}" to the live store.`);
+      await fetchDashboard();
+      onCatalogMutated();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Network error';
+      setModalError(`Failed to publish item: ${message}. Check your connection and try again.`);
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const handleResetCatalog = async () => {
@@ -405,7 +462,10 @@ export const SellerPortal: React.FC<SellerPortalProps> = ({
           <button
             type="button"
             data-testid="open-new-item-modal-btn"
-            onClick={() => setShowNewModal(true)}
+            onClick={() => {
+              setModalError(null);
+              setShowNewModal(true);
+            }}
             className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold bg-[#1E1B18] hover:bg-[#8B4B24] text-white rounded-lg transition-colors cursor-pointer whitespace-nowrap"
           >
             <Plus className="w-3.5 h-3.5" />
@@ -743,6 +803,13 @@ export const SellerPortal: React.FC<SellerPortalProps> = ({
             </div>
 
             <form onSubmit={handleCreateItem} className="space-y-4">
+              {modalError && (
+                <div className="p-3.5 rounded-lg bg-red-50 border border-red-200 text-xs font-medium text-red-800 flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0 text-red-600" />
+                  <span>{modalError}</span>
+                </div>
+              )}
+
               <div>
                 <label
                   htmlFor="new-item-title"
@@ -926,10 +993,17 @@ export const SellerPortal: React.FC<SellerPortalProps> = ({
                 </button>
                 <button
                   type="submit"
+                  disabled={submitting}
                   data-testid="submit-new-item-btn"
-                  className="px-5 py-2.5 text-xs font-semibold bg-[#1E1B18] hover:bg-[#8B4B24] text-white rounded-lg cursor-pointer"
+                  className="px-5 py-2.5 text-xs font-semibold bg-[#1E1B18] hover:bg-[#8B4B24] text-white rounded-lg cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
                 >
-                  Publish Item
+                  {submitting && (
+                    <svg className="animate-spin h-3.5 w-3.5 text-white" viewBox="0 0 24 24" fill="none">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                    </svg>
+                  )}
+                  {submitting ? 'Publishing Item...' : 'Publish Item'}
                 </button>
               </div>
             </form>

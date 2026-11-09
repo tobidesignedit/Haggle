@@ -165,13 +165,48 @@ export function createApiApp(): Express {
   const app = express();
   app.use(express.json());
 
-  // Normalize URL prefix for serverless rewrites (e.g. Vercel /api/* -> /api/index)
+  // Normalize URL prefix for serverless rewrites (e.g. Vercel /api/* -> /api/index?__path=$1)
   app.use((req, _res, next) => {
+    // 1. Check if Vercel forwarded subpath in query (__path or 0 or path)
+    const rawQueryPath =
+      (req.query?.__path as string) ||
+      (req.query?.['0'] as string) ||
+      (Array.isArray(req.query?.path) ? (req.query.path as string[]).join('/') : (req.query?.path as string));
+
+    if (rawQueryPath) {
+      const cleanPath = String(rawQueryPath).replace(/^\/+/, '');
+      const urlObj = new URL(req.url, 'http://localhost');
+      urlObj.pathname = `/api/${cleanPath}`;
+      urlObj.searchParams.delete('__path');
+      urlObj.searchParams.delete('0');
+      req.url = `${urlObj.pathname}${urlObj.search}`;
+    } else if (req.url.startsWith('/api/index')) {
+      // 2. If Vercel rewrote to /api/index or /api/index/...
+      const remainder = req.url.replace(/^\/api\/index/, '');
+      req.url = `/api${remainder.startsWith('/') ? '' : '/'}${remainder}`.replace(/\/+$/, '') || '/api';
+    }
+
+    // 3. Fallback header checks (x-matched-path, x-forwarded-uri, x-original-url)
+    const originalUrlHeader =
+      (req.headers['x-matched-path'] as string) ||
+      (req.headers['x-forwarded-uri'] as string) ||
+      (req.headers['x-original-url'] as string);
+
+    if (
+      originalUrlHeader &&
+      originalUrlHeader.startsWith('/api/') &&
+      (req.url === '/api/index' || req.url === '/api' || !req.url.startsWith('/api/'))
+    ) {
+      req.url = originalUrlHeader;
+    }
+
+    // 4. If path begins with known sub-routes without /api prefix
     if (!req.url.startsWith('/api/') && req.url !== '/api') {
       if (/^\/(items|negotiate|deals|paypal|seller|auth)(\/|$|\?)/.test(req.url)) {
         req.url = `/api${req.url}`;
       }
     }
+
     next();
   });
 
