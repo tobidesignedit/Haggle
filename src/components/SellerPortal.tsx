@@ -134,8 +134,15 @@ export const SellerPortal: React.FC<SellerPortalProps> = ({
       });
       setStatusNotice(`Signed in as maker (${credential.user.email}).`);
       fetchDashboard(token);
-    } catch {
-      setFormError('Google Sign-In popup was closed or blocked in preview.');
+    } catch (err: unknown) {
+      const code = (err as any)?.code;
+      if (code === 'auth/unauthorized-domain') {
+        setFormError(
+          'Firebase Domain Authorization Required: Your Vercel domain is not yet on the Firebase Authorized Domains list. Maker sign-in is optional—you can edit and publish items directly.'
+        );
+      } else {
+        setFormError('Google Sign-In was closed or blocked. You can still list and manage items as a maker.');
+      }
     }
   };
 

@@ -88,7 +88,24 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       }, 400);
     } catch (err: unknown) {
       console.error('Google Auth error:', err);
-      setErrorMessage('Google Sign-In was cancelled or popup was blocked in preview.');
+      const code = (err as any)?.code;
+      if (code === 'auth/unauthorized-domain') {
+        setErrorMessage(
+          'Firebase Domain Authorization Required: Your live Vercel domain is not yet on the Firebase Authorized Domains list. Use 1-Click Demo, PayPal, or Email & Password below to sign in immediately.'
+        );
+      } else if (code === 'auth/popup-blocked') {
+        setErrorMessage(
+          'Google popup was blocked by your browser. Please allow popups for this site, or use 1-Click Demo or PayPal below.'
+        );
+      } else if (code === 'auth/popup-closed-by-user') {
+        setErrorMessage(
+          'Google sign-in popup was closed before finishing. You can try again or use 1-Click Demo or PayPal below.'
+        );
+      } else {
+        setErrorMessage(
+          'Google Sign-In was cancelled or popup was blocked in preview. Use 1-Click Demo or PayPal below.'
+        );
+      }
     } finally {
       setLoading(false);
     }
@@ -290,9 +307,29 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
           {/* Feedback Alerts */}
           {errorMessage && (
-            <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-xs font-medium text-red-800 flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0" />
-              <span>{errorMessage}</span>
+            <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-xs font-medium text-red-800 space-y-2">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
+                <span className="leading-relaxed">{errorMessage}</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 pt-1.5 border-t border-red-200/80">
+                <button
+                  type="button"
+                  onClick={() => handleDemoSignIn(role)}
+                  className="px-2.5 py-1 text-[11px] font-bold bg-[#1E1B18] text-white rounded-md hover:bg-[#8B4B24] transition-colors cursor-pointer"
+                >
+                  Continue with 1-Click {role === 'maker' ? 'Maker' : 'Shopper'} Demo
+                </button>
+                {role === 'shopper' && (
+                  <button
+                    type="button"
+                    onClick={handlePayPalAuth}
+                    className="px-2.5 py-1 text-[11px] font-bold bg-[#FFC439] text-[#003087] rounded-md hover:bg-[#F2B829] transition-colors cursor-pointer"
+                  >
+                    Use PayPal Instead
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
