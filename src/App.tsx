@@ -104,10 +104,30 @@ export default function App() {
         fetch('/api/items'),
         fetch('/api/seller/dashboard'),
       ]);
+      let serverItems: PublicItem[] = [];
       if (itemsRes.ok) {
         const itemsData = await itemsRes.json();
-        setItems(itemsData.items || []);
+        serverItems = itemsData.items || [];
       }
+      // Merge with custom items from localStorage (preserving secret floor stripping)
+      try {
+        const customRaw = localStorage.getItem('haggle_custom_items');
+        if (customRaw) {
+          const customList: PublicItem[] = JSON.parse(customRaw);
+          const serverIds = new Set(serverItems.map((i) => i.id));
+          const uniqueCustom = customList
+            .filter((i) => !serverIds.has(i.id))
+            .map((item) => {
+              const { floorPrice: _, ...safeItem } = item as any;
+              return safeItem as PublicItem;
+            });
+          serverItems = [...uniqueCustom, ...serverItems];
+        }
+      } catch {
+        // Ignored
+      }
+      setItems(serverItems);
+
       if (dashRes.ok) {
         const dashData = await dashRes.json();
         setActiveLocksCount(dashData.metrics?.activePriceLocks || 0);

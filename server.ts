@@ -163,7 +163,8 @@ Return JSON with a crisp, warm 1-2 sentence reply (maximum 25 words total) in fi
 
 export function createApiApp(): Express {
   const app = express();
-  app.use(express.json());
+  app.use(express.json({ limit: '20mb' }));
+  app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
   // Normalize URL prefix for serverless rewrites (e.g. Vercel /api/* -> /api/index?__path=$1)
   app.use((req, _res, next) => {
