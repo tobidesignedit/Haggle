@@ -1,0 +1,6 @@
+{
+  "name": "Haggle — AI-Powered Bargaining Marketplace",
+  "description": "Negotiate prices in real-time with an AI agent representing artisan sellers, unlock pre-approved concessions, and lock in 15-minute guaranteed deals.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
