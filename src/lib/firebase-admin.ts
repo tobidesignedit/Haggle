@@ -6,6 +6,9 @@ function resolveProjectId(): string {
   if (process.env.FIREBASE_PROJECT_ID) {
     return process.env.FIREBASE_PROJECT_ID;
   }
+  if (process.env.VITE_FIREBASE_PROJECT_ID) {
+    return process.env.VITE_FIREBASE_PROJECT_ID;
+  }
   try {
     const configUrl = new URL('../../firebase-applet-config.json', import.meta.url);
     const parsed = JSON.parse(fs.readFileSync(configUrl, 'utf-8')) as {

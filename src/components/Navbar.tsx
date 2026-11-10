@@ -164,7 +164,16 @@ export const Navbar: React.FC<NavbarProps> = ({
             {currentUser ? (
               <div className="flex items-center gap-2">
                 <span className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold bg-[#D9ECFF] dark:bg-white/[0.08] text-[#003087] dark:text-[#F7F8F8] rounded-lg whitespace-nowrap">
-                  <User className="w-3.5 h-3.5" />
+                  {currentUser.photoUrl ? (
+                    <img
+                      src={currentUser.photoUrl}
+                      alt={currentUser.name}
+                      referrerPolicy="no-referrer"
+                      className="w-4 h-4 rounded-full object-cover shrink-0"
+                    />
+                  ) : (
+                    <User className="w-3.5 h-3.5" />
+                  )}
                   <span className="max-w-[120px] truncate">{currentUser.name}</span>
                 </span>
                 <button

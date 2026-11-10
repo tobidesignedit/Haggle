@@ -6,7 +6,7 @@ import {
   type ColDef,
   type ICellRendererParams,
 } from 'ag-grid-community';
-import { signInWithPopup } from 'firebase/auth';
+import { signInWithPopup, signInWithRedirect } from 'firebase/auth';
 import {
   Eye,
   EyeOff,
@@ -22,13 +22,17 @@ import {
   Camera,
   Trash2,
 } from 'lucide-react';
-import { auth, googleAuthProvider } from '../lib/firebase';
+import { auth, googleAuthProvider, activeFirebaseProjectId } from '../lib/firebase';
 import { formatCurrency, type SellerItem, type DealRecord } from '../lib/bargaining';
+import type { AuthUserProfile } from './LoginPage';
 
 ModuleRegistry.registerModules([AllCommunityModule]);
 
 interface SellerPortalProps {
   openNewModalInitially?: boolean;
+  currentUser?: AuthUserProfile | null;
+  externalToken?: string | null;
+  onUserAuthenticated?: (user: AuthUserProfile, token?: string) => void;
   onSelectItemForBargain: (itemId: string) => void;
   onCatalogMutated: () => void;
 }
@@ -46,6 +50,9 @@ interface DashboardMetrics {
 
 export const SellerPortal: React.FC<SellerPortalProps> = ({
   openNewModalInitially = false,
+  currentUser = null,
+  externalToken = null,
+  onUserAuthenticated,
   onSelectItemForBargain,
   onCatalogMutated,
 }) => {
@@ -65,9 +72,16 @@ export const SellerPortal: React.FC<SellerPortalProps> = ({
   const [dealStatusFilter, setDealStatusFilter] = useState<string>('ALL');
   const [dealQuickSearch, setDealQuickSearch] = useState<string>('');
 
-  // In-memory Firebase Auth Seller state
-  const [sellerUserEmail, setSellerUserEmail] = useState<string | null>(null);
-  const [idTokenInMemory, setIdTokenInMemory] = useState<string | null>(null);
+  // Seller Auth State
+  const [sellerUserEmail, setSellerUserEmail] = useState<string | null>(
+    currentUser?.email || null
+  );
+  const [idTokenInMemory, setIdTokenInMemory] = useState<string | null>(externalToken);
+
+  useEffect(() => {
+    if (currentUser?.email) setSellerUserEmail(currentUser.email);
+    if (externalToken) setIdTokenInMemory(externalToken);
+  }, [currentUser, externalToken]);
 
   const [showNewModal, setShowNewModal] = useState(openNewModalInitially);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
@@ -196,12 +210,32 @@ export const SellerPortal: React.FC<SellerPortalProps> = ({
   }, []);
 
   const handleGoogleSignIn = async () => {
+    setFormError(null);
     try {
-      setFormError(null);
+      const provRes = await fetch('/api/auth/providers');
+      if (provRes.ok) {
+        const provData = (await provRes.json()) as { directGoogleEnabled?: boolean };
+        if (provData.directGoogleEnabled) {
+          window.location.assign('/api/auth/google?role=maker&mode=signin&returnTo=%2Fseller');
+          return;
+        }
+      }
+    } catch {
+      // Fall back to Firebase Google Auth
+    }
+
+    try {
+      try {
+        sessionStorage.setItem('haggle_pending_auth_role', 'maker');
+      } catch {
+        // Ignored
+      }
+
       const credential = await signInWithPopup(auth, googleAuthProvider);
       const token = await credential.user.getIdToken();
+      const email = credential.user.email || 'Verified Maker';
       setIdTokenInMemory(token);
-      setSellerUserEmail(credential.user.email || 'Verified Maker');
+      setSellerUserEmail(email);
 
       await fetch('/api/auth/sync', {
         method: 'POST',
@@ -210,16 +244,38 @@ export const SellerPortal: React.FC<SellerPortalProps> = ({
           Authorization: `Bearer ${token}`,
         },
       });
-      setStatusNotice(`Signed in as maker (${credential.user.email}).`);
+
+      onUserAuthenticated?.(
+        {
+          email,
+          name: credential.user.displayName || 'Studio Maker',
+          role: 'maker',
+          photoUrl: credential.user.photoURL || undefined,
+        },
+        token
+      );
+      setStatusNotice(`Signed in as maker (${email}).`);
       fetchDashboard(token);
     } catch (err: unknown) {
-      const code = (err as any)?.code;
+      const code = (err as any)?.code as string | undefined;
+      if (code === 'auth/popup-blocked') {
+        try {
+          await signInWithRedirect(auth, googleAuthProvider);
+          return;
+        } catch {
+          // Fall through to diagnostic message
+        }
+      }
+
+      const host = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
       if (code === 'auth/unauthorized-domain') {
         setFormError(
-          'Firebase Domain Authorization Required: Your Vercel domain is not yet on the Firebase Authorized Domains list. Maker sign-in is optional—you can edit and publish items directly.'
+          `Domain "${host}" is not authorized yet in Firebase project "${activeFirebaseProjectId}". Add "${host}" in Firebase Authorized Domains (or configure GOOGLE_CLIENT_ID & GOOGLE_CLIENT_SECRET).`
         );
       } else {
-        setFormError('Google Sign-In was closed or blocked. You can still list and manage items as a maker.');
+        setFormError(
+          `Google Sign-In could not complete (${code || 'blocked'}). You can still list and manage items as a maker.`
+        );
       }
     }
   };

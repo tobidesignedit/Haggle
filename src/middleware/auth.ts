@@ -1,9 +1,71 @@
 import type { Request, Response, NextFunction } from 'express';
-import type { DecodedIdToken } from 'firebase-admin/auth';
 import { adminAuth } from '../lib/firebase-admin';
+import {
+  parseCookies,
+  verifySignedToken,
+  type SessionUser,
+} from '../lib/oauthSession';
+
+export interface AuthUser {
+  uid: string;
+  email?: string;
+  name?: string;
+  picture?: string;
+  role?: 'shopper' | 'maker';
+}
 
 export interface AuthRequest extends Request {
-  user?: DecodedIdToken;
+  user?: AuthUser;
+}
+
+async function resolveAuthenticatedUser(req: Request): Promise<AuthUser | null> {
+  const authHeader = req.headers.authorization;
+  const bearerToken =
+    authHeader && authHeader.startsWith('Bearer ')
+      ? authHeader.slice('Bearer '.length).trim()
+      : null;
+
+  if (bearerToken) {
+    // 1a. Try signed Haggle OAuth session token first
+    const sessionUser = verifySignedToken<SessionUser>(bearerToken);
+    if (sessionUser?.uid) {
+      return {
+        uid: sessionUser.uid,
+        email: sessionUser.email,
+        name: sessionUser.name,
+        picture: sessionUser.photoUrl,
+        role: sessionUser.role,
+      };
+    }
+
+    // 1b. Fall back to Firebase Admin verification
+    try {
+      const decodedToken = await adminAuth.verifyIdToken(bearerToken);
+      return {
+        uid: decodedToken.uid,
+        email: decodedToken.email,
+        name: typeof decodedToken.name === 'string' ? decodedToken.name : undefined,
+        picture: decodedToken.picture,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  // 2. Check HttpOnly session cookie (used by Google OAuth 2.0 redirect flow)
+  const cookies = parseCookies(req.headers.cookie);
+  const cookieUser = verifySignedToken<SessionUser>(cookies.haggle_session);
+  if (cookieUser?.uid) {
+    return {
+      uid: cookieUser.uid,
+      email: cookieUser.email,
+      name: cookieUser.name,
+      picture: cookieUser.photoUrl,
+      role: cookieUser.role,
+    };
+  }
+
+  return null;
 }
 
 export const requireAuth = async (
@@ -11,21 +73,13 @@ export const requireAuth = async (
   res: Response,
   next: NextFunction
 ) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    res.status(401).json({ error: 'Unauthorized: Missing token' });
+  const user = await resolveAuthenticatedUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Unauthorized: Missing or invalid authentication token' });
     return;
   }
-
-  const token = authHeader.split('Bearer ')[1];
-  try {
-    const decodedToken = await adminAuth.verifyIdToken(token);
-    req.user = decodedToken;
-    next();
-  } catch (error) {
-    console.error('Error verifying Firebase ID token:', error);
-    res.status(401).json({ error: 'Unauthorized: Invalid token' });
-  }
+  req.user = user;
+  next();
 };
 
 export const optionalAuth = async (
@@ -33,14 +87,9 @@ export const optionalAuth = async (
   _res: Response,
   next: NextFunction
 ) => {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.split('Bearer ')[1];
-    try {
-      req.user = await adminAuth.verifyIdToken(token);
-    } catch {
-      // Guest fallback allowed for public/guest routes
-    }
+  const user = await resolveAuthenticatedUser(req);
+  if (user) {
+    req.user = user;
   }
   next();
 };

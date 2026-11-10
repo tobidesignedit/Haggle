@@ -4,6 +4,8 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import { getRedirectResult, signOut } from 'firebase/auth';
+import { auth } from './lib/firebase';
 import { Navbar, type ActiveRoute, type WebsiteSettings } from './components/Navbar';
 import { CatalogView } from './components/CatalogView';
 import { BargainingRoom } from './components/BargainingRoom';
@@ -78,23 +80,30 @@ export default function App() {
       return null;
     }
   });
+  const [authToken, setAuthToken] = useState<string | null>(null);
+  const [initialAuthError, setInitialAuthError] = useState<string | null>(null);
 
-  const handleLoginSuccess = (user: AuthUserProfile) => {
+  const handleLoginSuccess = useCallback((user: AuthUserProfile, token?: string) => {
     setCurrentUser(user);
+    if (token) setAuthToken(token);
+    setInitialAuthError(null);
     try {
       sessionStorage.setItem('haggle_user', JSON.stringify(user));
     } catch {
       // Ignored
     }
-  };
+  }, []);
 
   const handleSignOut = () => {
     setCurrentUser(null);
+    setAuthToken(null);
     try {
       sessionStorage.removeItem('haggle_user');
     } catch {
       // Ignored
     }
+    fetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    signOut(auth).catch(() => {});
     setRoute({ view: 'catalog' });
   };
 
@@ -143,7 +152,14 @@ export default function App() {
 
   useEffect(() => {
     const path = window.location.pathname;
-    if (path.startsWith('/signup')) {
+    const params = new URLSearchParams(window.location.search);
+    const authError = params.get('auth_error');
+    const authProvider = params.get('auth_provider');
+
+    if (authError) {
+      setInitialAuthError(authError);
+      setRoute({ view: 'login', initialMode: 'signin' });
+    } else if (path.startsWith('/signup')) {
       setRoute({ view: 'login', initialMode: 'signup' });
     } else if (path.startsWith('/login')) {
       setRoute({ view: 'login', initialMode: 'signin' });
@@ -153,7 +169,67 @@ export default function App() {
       const id = path.replace('/items/', '').trim();
       if (id) setRoute({ view: 'bargain', itemId: id });
     }
-  }, []);
+
+    if (authError || authProvider) {
+      params.delete('auth_error');
+      params.delete('auth_provider');
+      const cleanedSearch = params.toString();
+      window.history.replaceState({}, '', `${path}${cleanedSearch ? `?${cleanedSearch}` : ''}`);
+    }
+
+    // Restore Google OAuth session cookie from server
+    fetch('/api/auth/session')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.authenticated && data.user) {
+          const profile: AuthUserProfile = {
+            email: data.user.email,
+            name: data.user.name,
+            role: data.user.role === 'maker' ? 'maker' : 'shopper',
+            photoUrl: data.user.photoUrl,
+          };
+          handleLoginSuccess(profile, data.token || undefined);
+          if (authProvider === 'google' && profile.role === 'maker') {
+            setRoute({ view: 'seller' });
+          }
+        }
+      })
+      .catch(() => {});
+
+    // Complete any pending Firebase signInWithRedirect return
+    getRedirectResult(auth)
+      .then(async (credential) => {
+        if (!credential?.user) return;
+        const token = await credential.user.getIdToken();
+        const pendingRole =
+          sessionStorage.getItem('haggle_pending_auth_role') === 'maker' ? 'maker' : 'shopper';
+        sessionStorage.removeItem('haggle_pending_auth_role');
+
+        fetch('/api/auth/sync', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+        }).catch(() => {});
+
+        const profile: AuthUserProfile = {
+          email: credential.user.email || 'user@haggle.market',
+          name:
+            credential.user.displayName ||
+            (pendingRole === 'maker' ? 'Studio Maker' : 'Handmade Collector'),
+          role: pendingRole,
+          photoUrl: credential.user.photoURL || undefined,
+        };
+        handleLoginSuccess(profile, token);
+        setRoute(pendingRole === 'maker' ? { view: 'seller' } : { view: 'catalog' });
+      })
+      .catch((err) => {
+        if (err && (err as any).code) {
+          console.warn('Firebase redirect auth note:', (err as any).code);
+        }
+      });
+  }, [handleLoginSuccess]);
 
   const handleNavigate = (next: ActiveRoute) => {
     setRoute(next);
@@ -195,6 +271,7 @@ export default function App() {
           <LoginPage
             initialRole={route.initialRole || 'shopper'}
             initialMode={route.initialMode || 'signin'}
+            initialAuthError={initialAuthError}
             onNavigate={handleNavigate}
             onLoginSuccess={handleLoginSuccess}
           />
@@ -217,6 +294,9 @@ export default function App() {
         {route.view === 'seller' && (
           <SellerPortal
             openNewModalInitially={route.openNewModal}
+            currentUser={currentUser}
+            externalToken={authToken}
+            onUserAuthenticated={handleLoginSuccess}
             onSelectItemForBargain={(itemId) => handleNavigate({ view: 'bargain', itemId })}
             onCatalogMutated={fetchCatalogAndMetrics}
           />

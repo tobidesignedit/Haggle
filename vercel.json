@@ -4,11 +4,15 @@
   "outputDirectory": "dist",
   "rewrites": [
     {
+      "source": "/__/auth/(.*)",
+      "destination": "https://igneous-empire-8bvhw.firebaseapp.com/__/auth/$1"
+    },
+    {
       "source": "/api/(.*)",
       "destination": "/api/index?__path=$1"
     },
     {
-      "source": "/((?!api/|assets/|src/assets/|favicon\\.svg|favicon\\.ico).*)",
+      "source": "/((?!api/|__/auth/|assets/|src/assets/|favicon\\.svg|favicon\\.ico).*)",
       "destination": "/index.html"
     }
   ]

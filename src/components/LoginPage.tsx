@@ -1,5 +1,5 @@
-import React, { useState } from 'react';
-import { signInWithPopup } from 'firebase/auth';
+import React, { useState, useEffect } from 'react';
+import { signInWithPopup, signInWithRedirect } from 'firebase/auth';
 import {
   ArrowLeft,
   Mail,
@@ -13,7 +13,7 @@ import {
   ArrowRight,
   Sparkles,
 } from 'lucide-react';
-import { auth, googleAuthProvider } from '../lib/firebase';
+import { auth, googleAuthProvider, activeFirebaseProjectId } from '../lib/firebase';
 import type { ActiveRoute } from './Navbar';
 
 export interface AuthUserProfile {
@@ -23,11 +23,32 @@ export interface AuthUserProfile {
   photoUrl?: string;
 }
 
+interface AuthProviderInfo {
+  directGoogleEnabled: boolean;
+  redirectUri: string;
+  origin: string;
+}
+
 interface LoginPageProps {
   onNavigate: (route: ActiveRoute) => void;
-  onLoginSuccess: (user: AuthUserProfile) => void;
+  onLoginSuccess: (user: AuthUserProfile, token?: string) => void;
   initialRole?: 'shopper' | 'maker';
   initialMode?: 'signin' | 'signup';
+  initialAuthError?: string | null;
+}
+
+function formatRedirectAuthError(code: string): string {
+  switch (code) {
+    case 'access_denied':
+    case 'cancelled':
+      return 'Google sign-in was cancelled. You can try again anytime.';
+    case 'google_not_configured':
+      return 'Google OAuth credentials are not configured on the server yet. Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or authorize this domain in Firebase Console.';
+    case 'email_unverified':
+      return 'Your Google email address is not verified.';
+    default:
+      return `Google sign-in could not be completed (${code}). Please try again.`;
+  }
 }
 
 export const LoginPage: React.FC<LoginPageProps> = ({
@@ -35,6 +56,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   onLoginSuccess,
   initialRole = 'shopper',
   initialMode = 'signin',
+  initialAuthError = null,
 }) => {
   const [role, setRole] = useState<'shopper' | 'maker'>(initialRole);
   const [mode, setMode] = useState<'signin' | 'signup'>(initialMode);
@@ -43,17 +65,47 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   const [name, setName] = useState('');
   const [agreedTerms, setAgreedTerms] = useState(true);
   const [loading, setLoading] = useState(false);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(() =>
+    initialAuthError ? formatRedirectAuthError(initialAuthError) : null
+  );
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
+  const [providers, setProviders] = useState<AuthProviderInfo | null>(null);
+
+  useEffect(() => {
+    fetch('/api/auth/providers')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: AuthProviderInfo | null) => {
+        if (data) setProviders(data);
+      })
+      .catch(() => {});
+  }, []);
 
   const handleGoogleAuth = async () => {
+    setErrorMessage(null);
+
+    // 1. Prefer popup-free server-side Google OAuth 2.0 when GOOGLE_CLIENT_ID & SECRET are configured
+    if (providers?.directGoogleEnabled) {
+      setLoading(true);
+      const returnTo = role === 'maker' ? '/seller' : '/';
+      window.location.assign(
+        `/api/auth/google?role=${encodeURIComponent(role)}&mode=${encodeURIComponent(mode)}&returnTo=${encodeURIComponent(returnTo)}`
+      );
+      return;
+    }
+
+    // 2. Otherwise use Firebase Google Sign-In (with automatic redirect fallback if popup blocked)
     try {
       setLoading(true);
-      setErrorMessage(null);
+      try {
+        sessionStorage.setItem('haggle_pending_auth_role', role);
+      } catch {
+        // Ignored
+      }
+
       const credential = await signInWithPopup(auth, googleAuthProvider);
       const token = await credential.user.getIdToken();
 
-      // Sync user profile to backend Cloud SQL users table
+      // Sync user profile to backend Cloud SQL / store
       try {
         await fetch('/api/auth/sync', {
           method: 'POST',
@@ -68,7 +120,8 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
       const profile: AuthUserProfile = {
         email: credential.user.email || 'user@haggle.market',
-        name: credential.user.displayName || (role === 'maker' ? 'Studio Maker' : 'Handmade Collector'),
+        name:
+          credential.user.displayName || (role === 'maker' ? 'Studio Maker' : 'Handmade Collector'),
         role,
         photoUrl: credential.user.photoURL || undefined,
       };
@@ -79,7 +132,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
           : `Signed in successfully as ${profile.email}!`
       );
       setTimeout(() => {
-        onLoginSuccess(profile);
+        onLoginSuccess(profile, token);
         if (role === 'maker') {
           onNavigate({ view: 'seller' });
         } else {
@@ -87,23 +140,37 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         }
       }, 400);
     } catch (err: unknown) {
+      const code = (err as any)?.code as string | undefined;
+      if (code === 'auth/popup-blocked') {
+        try {
+          await signInWithRedirect(auth, googleAuthProvider);
+          return;
+        } catch (redirectErr) {
+          console.error('Google Redirect fallback error:', redirectErr);
+        }
+      }
+
       console.error('Google Auth error:', err);
-      const code = (err as any)?.code;
+      const currentHost = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
+      const callbackUrl =
+        providers?.redirectUri ||
+        (typeof window !== 'undefined' ? `${window.location.origin}/api/auth/google/callback` : '/api/auth/google/callback');
+
       if (code === 'auth/unauthorized-domain') {
         setErrorMessage(
-          'Firebase Domain Authorization Required: Your live Vercel domain is not yet on the Firebase Authorized Domains list. Use 1-Click Demo, PayPal, or Email & Password below to sign in immediately.'
+          `Domain "${currentHost}" is not authorized yet in Firebase project "${activeFirebaseProjectId}". Add "${currentHost}" to Firebase Authorized Domains (or add GOOGLE_CLIENT_ID & GOOGLE_CLIENT_SECRET with redirect URI "${callbackUrl}").`
         );
       } else if (code === 'auth/popup-blocked') {
         setErrorMessage(
-          'Google popup was blocked by your browser. Please allow popups for this site, or use 1-Click Demo or PayPal below.'
+          'Google popup was blocked by your browser. Please allow popups for this site or configure direct Google OAuth.'
         );
       } else if (code === 'auth/popup-closed-by-user') {
         setErrorMessage(
-          'Google sign-in popup was closed before finishing. You can try again or use 1-Click Demo or PayPal below.'
+          'Google sign-in popup was closed before finishing. Please try again.'
         );
       } else {
         setErrorMessage(
-          'Google Sign-In was cancelled or popup was blocked in preview. Use 1-Click Demo or PayPal below.'
+          `Google Sign-In could not complete (${code || 'unknown error'}). Verify Firebase Authorized Domains for "${currentHost}" or configure GOOGLE_CLIENT_ID & GOOGLE_CLIENT_SECRET.`
         );
       }
     } finally {
