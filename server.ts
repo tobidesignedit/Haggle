@@ -30,6 +30,7 @@ import {
 } from './src/db/repository';
 import { requireAuth, optionalAuth, type AuthRequest } from './src/middleware/auth';
 import {
+  getPublicGoogleClientId,
   getGoogleOAuthCredentials,
   hasDirectGoogleOAuthConfig,
   parseCookies,
@@ -227,11 +228,105 @@ export function createApiApp(): Express {
   });
 
   // ---------------------------------------------------------------------------
-  // 0. AUTHENTICATION ENDPOINTS (Direct Google OAuth 2.0 + Firebase Auth Sync)
+  // 0. AUTHENTICATION ENDPOINTS (Direct Google OAuth 2.0 + GSI + Firebase Sync)
   // ---------------------------------------------------------------------------
+  interface VerifiedGoogleProfile {
+    sub: string;
+    email: string;
+    name?: string;
+    picture?: string;
+  }
+
+  async function exchangeCodeForGoogleProfile(
+    code: string,
+    clientId: string,
+    clientSecret: string,
+    redirectUri: string
+  ): Promise<{ profile?: VerifiedGoogleProfile; errorCode?: string }> {
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: clientId,
+        client_secret: clientSecret,
+        redirect_uri: redirectUri,
+        grant_type: 'authorization_code',
+      }),
+    });
+
+    if (!tokenRes.ok) {
+      return { errorCode: 'token_exchange_failed' };
+    }
+
+    const tokenJson = (await tokenRes.json()) as { access_token?: string };
+    if (!tokenJson.access_token) {
+      return { errorCode: 'missing_access_token' };
+    }
+
+    const userRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      headers: { Authorization: `Bearer ${tokenJson.access_token}` },
+    });
+
+    if (!userRes.ok) {
+      return { errorCode: 'profile_fetch_failed' };
+    }
+
+    const googleProfile = (await userRes.json()) as {
+      sub?: string;
+      email?: string;
+      email_verified?: boolean;
+      name?: string;
+      picture?: string;
+    };
+
+    if (!googleProfile.sub || !googleProfile.email || googleProfile.email_verified === false) {
+      return { errorCode: 'email_unverified' };
+    }
+
+    return {
+      profile: {
+        sub: googleProfile.sub,
+        email: googleProfile.email,
+        name: googleProfile.name,
+        picture: googleProfile.picture,
+      },
+    };
+  }
+
+  async function issueSessionForGoogleProfile(
+    req: express.Request,
+    res: express.Response,
+    profile: VerifiedGoogleProfile,
+    role: 'shopper' | 'maker'
+  ): Promise<{ user: SessionUser; token: string }> {
+    const uid = `google-${profile.sub}`;
+    await getOrCreateUser(uid, profile.email);
+
+    const sessionUser: SessionUser = {
+      uid,
+      email: profile.email,
+      name: profile.name || (role === 'maker' ? 'Studio Maker' : profile.email.split('@')[0]),
+      role,
+      photoUrl: profile.picture,
+    };
+
+    const sessionToken = signToken(sessionUser, 60 * 60 * 24 * 7);
+    res.cookie('haggle_session', sessionToken, {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: isSecureRequest(req),
+      path: '/',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+
+    return { user: sessionUser, token: sessionToken };
+  }
+
   app.get('/api/auth/providers', (req, res) => {
     res.json({
       directGoogleEnabled: hasDirectGoogleOAuthConfig(),
+      googleClientId: getPublicGoogleClientId(),
       redirectUri: resolveGoogleRedirectUri(req),
       origin: resolvePublicOrigin(req),
     });
@@ -284,10 +379,7 @@ export function createApiApp(): Express {
     const returnTo = sanitizeReturnTo(req.query.returnTo || (role === 'maker' ? '/seller' : '/'));
     const nonce = crypto.randomBytes(16).toString('hex');
 
-    const stateToken = signToken<OAuthStatePayload>(
-      { nonce, role, mode, returnTo },
-      10 * 60
-    );
+    const stateToken = signToken<OAuthStatePayload>({ nonce, role, mode, returnTo }, 10 * 60);
 
     res.cookie('haggle_oauth_state', nonce, {
       httpOnly: true,
@@ -338,76 +430,19 @@ export function createApiApp(): Express {
     }
 
     try {
-      const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          code,
-          client_id: creds.clientId,
-          client_secret: creds.clientSecret,
-          redirect_uri: resolveGoogleRedirectUri(req),
-          grant_type: 'authorization_code',
-        }),
-      });
-
-      if (!tokenRes.ok) {
+      const exchanged = await exchangeCodeForGoogleProfile(
+        code,
+        creds.clientId,
+        creds.clientSecret,
+        resolveGoogleRedirectUri(req)
+      );
+      if (exchanged.errorCode || !exchanged.profile) {
         clearStateCookie();
-        res.redirect('/login?auth_error=token_exchange_failed');
+        res.redirect(`/login?auth_error=${exchanged.errorCode || 'oauth_callback_error'}`);
         return;
       }
 
-      const tokenJson = (await tokenRes.json()) as { access_token?: string };
-      if (!tokenJson.access_token) {
-        clearStateCookie();
-        res.redirect('/login?auth_error=missing_access_token');
-        return;
-      }
-
-      const userRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
-        headers: { Authorization: `Bearer ${tokenJson.access_token}` },
-      });
-
-      if (!userRes.ok) {
-        clearStateCookie();
-        res.redirect('/login?auth_error=profile_fetch_failed');
-        return;
-      }
-
-      const googleProfile = (await userRes.json()) as {
-        sub?: string;
-        email?: string;
-        email_verified?: boolean;
-        name?: string;
-        picture?: string;
-      };
-
-      if (!googleProfile.sub || !googleProfile.email || googleProfile.email_verified === false) {
-        clearStateCookie();
-        res.redirect('/login?auth_error=email_unverified');
-        return;
-      }
-
-      const uid = `google-${googleProfile.sub}`;
-      await getOrCreateUser(uid, googleProfile.email);
-
-      const sessionUser: SessionUser = {
-        uid,
-        email: googleProfile.email,
-        name:
-          googleProfile.name ||
-          (verifiedState.role === 'maker' ? 'Studio Maker' : googleProfile.email.split('@')[0]),
-        role: verifiedState.role,
-        photoUrl: googleProfile.picture,
-      };
-
-      const sessionToken = signToken(sessionUser, 60 * 60 * 24 * 7);
-      res.cookie('haggle_session', sessionToken, {
-        httpOnly: true,
-        sameSite: 'lax',
-        secure,
-        path: '/',
-        maxAge: 7 * 24 * 60 * 60 * 1000,
-      });
+      await issueSessionForGoogleProfile(req, res, exchanged.profile, verifiedState.role);
       clearStateCookie();
 
       const dest = sanitizeReturnTo(verifiedState.returnTo);
@@ -417,6 +452,174 @@ export function createApiApp(): Express {
       console.error('Google OAuth callback error:', error);
       clearStateCookie();
       res.redirect('/login?auth_error=oauth_callback_error');
+    }
+  });
+
+  // Handles Google Authorization Code redirect returning to origin root (e.g. https://haggle-six.vercel.app/?code=...&state=...)
+  app.post('/api/auth/google/exchange', async (req, res) => {
+    const secure = isSecureRequest(req);
+    const clearStateCookie = () =>
+      res.clearCookie('haggle_oauth_state', { path: '/', httpOnly: true, sameSite: 'lax', secure });
+
+    const creds = getGoogleOAuthCredentials();
+    const { code, state } = (req.body || {}) as { code?: string; state?: string };
+
+    if (!creds || !code || !state) {
+      clearStateCookie();
+      res.status(400).json({ error: 'Missing OAuth code or configuration' });
+      return;
+    }
+
+    const cookies = parseCookies(req.headers.cookie);
+    const verifiedState = verifySignedToken<OAuthStatePayload>(state);
+    if (!verifiedState || !cookies.haggle_oauth_state || verifiedState.nonce !== cookies.haggle_oauth_state) {
+      clearStateCookie();
+      res.status(401).json({ error: 'Invalid or expired OAuth state' });
+      return;
+    }
+
+    try {
+      const exchanged = await exchangeCodeForGoogleProfile(
+        code,
+        creds.clientId,
+        creds.clientSecret,
+        resolveGoogleRedirectUri(req)
+      );
+      if (exchanged.errorCode || !exchanged.profile) {
+        clearStateCookie();
+        res.status(401).json({ error: exchanged.errorCode || 'Google authorization failed' });
+        return;
+      }
+
+      const { user, token } = await issueSessionForGoogleProfile(
+        req,
+        res,
+        exchanged.profile,
+        verifiedState.role
+      );
+      clearStateCookie();
+      res.json({
+        authenticated: true,
+        user,
+        token,
+        returnTo: sanitizeReturnTo(verifiedState.returnTo),
+      });
+    } catch (error) {
+      console.error('Google OAuth code exchange error:', error);
+      clearStateCookie();
+      res.status(500).json({ error: 'Failed to complete Google sign-in' });
+    }
+  });
+
+  // Verifies Google Identity Services (ID Token JWT or OAuth Access Token) directly without needing client_secret on serverless
+  app.post('/api/auth/google/verify', async (req, res) => {
+    const { credential, accessToken, role: rawRole } = (req.body || {}) as {
+      credential?: string;
+      accessToken?: string;
+      role?: string;
+    };
+    const role: 'shopper' | 'maker' = rawRole === 'maker' ? 'maker' : 'shopper';
+    const expectedClientId = getPublicGoogleClientId();
+
+    if (!credential && !accessToken) {
+      res.status(400).json({ error: 'Missing Google credential or access token' });
+      return;
+    }
+
+    try {
+      let verifiedProfile: VerifiedGoogleProfile | null = null;
+
+      if (credential) {
+        const infoRes = await fetch(
+          `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(credential)}`
+        );
+        if (!infoRes.ok) {
+          res.status(401).json({ error: 'Google ID token verification failed' });
+          return;
+        }
+        const info = (await infoRes.json()) as {
+          aud?: string;
+          sub?: string;
+          email?: string;
+          email_verified?: string | boolean;
+          name?: string;
+          picture?: string;
+          exp?: string;
+        };
+        const expSec = Number(info.exp || 0);
+        const nowSec = Math.floor(Date.now() / 1000);
+        const emailVerified = info.email_verified === true || info.email_verified === 'true';
+
+        if (info.aud !== expectedClientId || !info.sub || !info.email || !emailVerified || expSec <= nowSec) {
+          res.status(401).json({ error: 'Google credential audience or signature mismatch' });
+          return;
+        }
+
+        verifiedProfile = {
+          sub: info.sub,
+          email: info.email,
+          name: info.name,
+          picture: info.picture,
+        };
+      } else if (accessToken) {
+        const tokenInfoRes = await fetch(
+          `https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=${encodeURIComponent(accessToken)}`
+        );
+        if (!tokenInfoRes.ok) {
+          res.status(401).json({ error: 'Google access token verification failed' });
+          return;
+        }
+        const tokenInfo = (await tokenInfoRes.json()) as {
+          aud?: string;
+          azp?: string;
+          exp?: string;
+        };
+        const expSec = Number(tokenInfo.exp || 0);
+        const nowSec = Math.floor(Date.now() / 1000);
+        const matchesClient =
+          tokenInfo.aud === expectedClientId || tokenInfo.azp === expectedClientId;
+        if (!matchesClient || expSec <= nowSec) {
+          res.status(401).json({ error: 'Google access token does not belong to this app' });
+          return;
+        }
+
+        const userRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        if (!userRes.ok) {
+          res.status(401).json({ error: 'Could not read verified Google profile' });
+          return;
+        }
+        const profileJson = (await userRes.json()) as {
+          sub?: string;
+          email?: string;
+          email_verified?: boolean;
+          name?: string;
+          picture?: string;
+        };
+        if (!profileJson.sub || !profileJson.email || profileJson.email_verified === false) {
+          res.status(401).json({ error: 'Google email is missing or unverified' });
+          return;
+        }
+
+        verifiedProfile = {
+          sub: profileJson.sub,
+          email: profileJson.email,
+          name: profileJson.name,
+          picture: profileJson.picture,
+        };
+      }
+
+      if (!verifiedProfile) {
+        res.status(401).json({ error: 'Unable to verify Google identity' });
+        return;
+      }
+
+      const { user, token } = await issueSessionForGoogleProfile(req, res, verifiedProfile, role);
+      res.json({ authenticated: true, user, token });
+    } catch (error) {
+      console.error('Google GSI verify error:', error);
+      res.status(500).json({ error: 'Failed to verify Google Sign-In' });
     }
   });
 

@@ -64,10 +64,7 @@ test('resolvePublicOrigin and resolveGoogleRedirectUri honor forwarded Vercel he
   } as unknown as Parameters<typeof resolvePublicOrigin>[0];
 
   assert.equal(resolvePublicOrigin(mockVercelReq), 'https://haggle-market.vercel.app');
-  assert.equal(
-    resolveGoogleRedirectUri(mockVercelReq),
-    'https://haggle-market.vercel.app/api/auth/google/callback'
-  );
+  assert.equal(resolveGoogleRedirectUri(mockVercelReq), 'https://haggle-market.vercel.app');
 });
 
 test('Express auth session & sync endpoints accept signed Haggle OAuth session', async () => {
@@ -84,10 +81,20 @@ test('Express auth session & sync endpoints accept signed Haggle OAuth session',
     assert.equal(provRes.status, 200);
     const provJson = (await provRes.json()) as {
       directGoogleEnabled: boolean;
+      googleClientId: string;
       redirectUri: string;
     };
     assert.equal(typeof provJson.directGoogleEnabled, 'boolean');
-    assert.ok(provJson.redirectUri.endsWith('/api/auth/google/callback'));
+    assert.ok(provJson.googleClientId.endsWith('.apps.googleusercontent.com'));
+    assert.ok(provJson.redirectUri.startsWith('http://127.0.0.1:'));
+
+    // 1b. /api/auth/google/verify rejects missing credentials cleanly
+    const missingVerifyRes = await fetch(`${baseUrl}/api/auth/google/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'shopper' }),
+    });
+    assert.equal(missingVerifyRes.status, 400);
 
     // 2. /api/auth/session unauthenticated by default
     const anonRes = await fetch(`${baseUrl}/api/auth/session`);
@@ -133,3 +140,4 @@ test('Express auth session & sync endpoints accept signed Haggle OAuth session',
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+

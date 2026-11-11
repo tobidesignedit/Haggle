@@ -16,10 +16,25 @@ export interface OAuthStatePayload {
   returnTo: string;
 }
 
+// Public OAuth Client ID (non-secret identifier safe for frontend Google Identity Services)
+export const DEFAULT_PUBLIC_GOOGLE_CLIENT_ID =
+  '2154458695-g2mdcnndm88rakfn07hk35vec1sk49er.apps.googleusercontent.com';
+
+export function getPublicGoogleClientId(): string {
+  const envId =
+    process.env.GOOGLE_CLIENT_ID?.trim() ||
+    process.env.VITE_GOOGLE_CLIENT_ID?.trim() ||
+    '';
+  if (envId && envId !== 'YOUR_GOOGLE_OAUTH_CLIENT_ID' && envId !== 'YOUR_GOOGLE_CLIENT_ID') {
+    return envId;
+  }
+  return DEFAULT_PUBLIC_GOOGLE_CLIENT_ID;
+}
+
 export function getGoogleOAuthCredentials(): { clientId: string; clientSecret: string } | null {
-  const clientId = process.env.GOOGLE_CLIENT_ID?.trim() || '';
+  const clientId = getPublicGoogleClientId();
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim() || '';
-  if (!clientId || !clientSecret || clientId === 'YOUR_GOOGLE_CLIENT_ID') {
+  if (!clientId || !clientSecret || clientSecret === 'YOUR_GOOGLE_OAUTH_CLIENT_SECRET') {
     return null;
   }
   return { clientId, clientSecret };
@@ -140,7 +155,7 @@ export function resolvePublicOrigin(req: Request): string {
 export function resolveGoogleRedirectUri(req: Request): string {
   const explicit = process.env.GOOGLE_REDIRECT_URI?.trim();
   if (explicit) return explicit;
-  return `${resolvePublicOrigin(req)}/api/auth/google/callback`;
+  return resolvePublicOrigin(req);
 }
 
 export function isSecureRequest(req: Request): boolean {
@@ -148,3 +163,4 @@ export function isSecureRequest(req: Request): boolean {
   if (forwardedProto) return forwardedProto === 'https';
   return req.secure;
 }
+

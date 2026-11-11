@@ -23,6 +23,11 @@ import {
   Trash2,
 } from 'lucide-react';
 import { auth, googleAuthProvider, activeFirebaseProjectId } from '../lib/firebase';
+import {
+  DEFAULT_GOOGLE_CLIENT_ID,
+  loadGoogleGsiScript,
+  verifyGoogleCredentialWithServer,
+} from '../lib/googleGsi';
 import { formatCurrency, type SellerItem, type DealRecord } from '../lib/bargaining';
 import type { AuthUserProfile } from './LoginPage';
 
@@ -77,11 +82,25 @@ export const SellerPortal: React.FC<SellerPortalProps> = ({
     currentUser?.email || null
   );
   const [idTokenInMemory, setIdTokenInMemory] = useState<string | null>(externalToken);
+  const [authProviders, setAuthProviders] = useState<{
+    directGoogleEnabled?: boolean;
+    googleClientId?: string;
+  } | null>(null);
 
   useEffect(() => {
     if (currentUser?.email) setSellerUserEmail(currentUser.email);
     if (externalToken) setIdTokenInMemory(externalToken);
   }, [currentUser, externalToken]);
+
+  useEffect(() => {
+    loadGoogleGsiScript().catch(() => {});
+    fetch('/api/auth/providers')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data) setAuthProviders(data);
+      })
+      .catch(() => {});
+  }, []);
 
   const [showNewModal, setShowNewModal] = useState(openNewModalInitially);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
@@ -211,19 +230,65 @@ export const SellerPortal: React.FC<SellerPortalProps> = ({
 
   const handleGoogleSignIn = async () => {
     setFormError(null);
-    try {
-      const provRes = await fetch('/api/auth/providers');
-      if (provRes.ok) {
-        const provData = (await provRes.json()) as { directGoogleEnabled?: boolean };
-        if (provData.directGoogleEnabled) {
-          window.location.assign('/api/auth/google?role=maker&mode=signin&returnTo=%2Fseller');
-          return;
-        }
+    const activeClientId =
+      authProviders?.googleClientId ||
+      import.meta.env.VITE_GOOGLE_CLIENT_ID ||
+      DEFAULT_GOOGLE_CLIENT_ID;
+
+    // 1. Trigger Google Identity Services OAuth2 token client directly on click (preserves user gesture)
+    if (window.google?.accounts?.oauth2) {
+      try {
+        const tokenClient = window.google.accounts.oauth2.initTokenClient({
+          client_id: activeClientId,
+          scope: 'openid email profile',
+          callback: async (tokenResp) => {
+            if (tokenResp.error || !tokenResp.access_token) {
+              setFormError(
+                tokenResp.error_description ||
+                  `Google Sign-In was cancelled or blocked (${tokenResp.error || 'access_denied'}).`
+              );
+              return;
+            }
+            try {
+              const { user, token } = await verifyGoogleCredentialWithServer({
+                accessToken: tokenResp.access_token,
+                role: 'maker',
+              });
+              setIdTokenInMemory(token);
+              setSellerUserEmail(user.email);
+              onUserAuthenticated?.(user, token);
+              setStatusNotice(`Signed in as maker (${user.email}).`);
+              fetchDashboard(token);
+            } catch (err: unknown) {
+              setFormError(
+                err instanceof Error ? err.message : 'Google token verification failed.'
+              );
+            }
+          },
+          error_callback: (err) => {
+            if (err?.type === 'popup_failed_to_open' && authProviders?.directGoogleEnabled) {
+              window.location.assign('/api/auth/google?role=maker&mode=signin&returnTo=%2Fseller');
+              return;
+            }
+            setFormError(
+              err?.message || 'Google Sign-In popup could not complete. Try again or manage items directly.'
+            );
+          },
+        });
+        tokenClient.requestAccessToken({ prompt: 'select_account' });
+        return;
+      } catch {
+        // Fall through to redirect / Firebase fallback
       }
-    } catch {
-      // Fall back to Firebase Google Auth
     }
 
+    // 2. Direct full-page OAuth 2.0 redirect if configured on server
+    if (authProviders?.directGoogleEnabled) {
+      window.location.assign('/api/auth/google?role=maker&mode=signin&returnTo=%2Fseller');
+      return;
+    }
+
+    // 3. Firebase fallback
     try {
       try {
         sessionStorage.setItem('haggle_pending_auth_role', 'maker');
@@ -267,10 +332,10 @@ export const SellerPortal: React.FC<SellerPortalProps> = ({
         }
       }
 
-      const host = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
+      const host = typeof window !== 'undefined' ? window.location.origin : 'this domain';
       if (code === 'auth/unauthorized-domain') {
         setFormError(
-          `Domain "${host}" is not authorized yet in Firebase project "${activeFirebaseProjectId}". Add "${host}" in Firebase Authorized Domains (or configure GOOGLE_CLIENT_ID & GOOGLE_CLIENT_SECRET).`
+          `Add "${host}" to Google Cloud Authorized JavaScript Origins (or use https://haggle-six.vercel.app) — Firebase project "${activeFirebaseProjectId}" has not authorized this domain.`
         );
       } else {
         setFormError(

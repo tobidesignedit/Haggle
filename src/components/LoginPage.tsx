@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { signInWithPopup, signInWithRedirect } from 'firebase/auth';
 import {
   ArrowLeft,
@@ -14,6 +14,11 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { auth, googleAuthProvider, activeFirebaseProjectId } from '../lib/firebase';
+import {
+  DEFAULT_GOOGLE_CLIENT_ID,
+  loadGoogleGsiScript,
+  verifyGoogleCredentialWithServer,
+} from '../lib/googleGsi';
 import type { ActiveRoute } from './Navbar';
 
 export interface AuthUserProfile {
@@ -25,6 +30,7 @@ export interface AuthUserProfile {
 
 interface AuthProviderInfo {
   directGoogleEnabled: boolean;
+  googleClientId?: string;
   redirectUri: string;
   origin: string;
 }
@@ -43,7 +49,7 @@ function formatRedirectAuthError(code: string): string {
     case 'cancelled':
       return 'Google sign-in was cancelled. You can try again anytime.';
     case 'google_not_configured':
-      return 'Google OAuth credentials are not configured on the server yet. Add GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET, or authorize this domain in Firebase Console.';
+      return 'Server OAuth secret not configured yet. Try the Google button or add GOOGLE_CLIENT_SECRET to environment variables.';
     case 'email_unverified':
       return 'Your Google email address is not verified.';
     default:
@@ -70,6 +76,18 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   );
   const [successNotice, setSuccessNotice] = useState<string | null>(null);
   const [providers, setProviders] = useState<AuthProviderInfo | null>(null);
+  const [gisReady, setGisReady] = useState(false);
+
+  const googleBtnRef = useRef<HTMLDivElement | null>(null);
+  const roleRef = useRef(role);
+  const modeRef = useRef(mode);
+  roleRef.current = role;
+  modeRef.current = mode;
+
+  const activeGoogleClientId =
+    providers?.googleClientId ||
+    import.meta.env.VITE_GOOGLE_CLIENT_ID ||
+    DEFAULT_GOOGLE_CLIENT_ID;
 
   useEffect(() => {
     fetch('/api/auth/providers')
@@ -80,10 +98,133 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       .catch(() => {});
   }, []);
 
+  // Initialize official Google Identity Services button (works natively on https://haggle-six.vercel.app)
+  useEffect(() => {
+    let cancelled = false;
+    loadGoogleGsiScript().then((loaded) => {
+      if (cancelled || !loaded || !window.google?.accounts?.id || !googleBtnRef.current) return;
+
+      try {
+        window.google.accounts.id.initialize({
+          client_id: activeGoogleClientId,
+          callback: async (response) => {
+            if (!response.credential) {
+              setErrorMessage('Google did not return a credential token. Please try again.');
+              return;
+            }
+            setLoading(true);
+            setErrorMessage(null);
+            try {
+              const selectedRole = roleRef.current;
+              const { user, token } = await verifyGoogleCredentialWithServer({
+                credential: response.credential,
+                role: selectedRole,
+              });
+              setSuccessNotice(
+                modeRef.current === 'signup'
+                  ? `Account created! Welcome to Haggle, ${user.name}.`
+                  : `Signed in successfully as ${user.email}!`
+              );
+              setTimeout(() => {
+                onLoginSuccess(user, token);
+                onNavigate(selectedRole === 'maker' ? { view: 'seller' } : { view: 'catalog' });
+              }, 350);
+            } catch (err: unknown) {
+              setErrorMessage(
+                err instanceof Error ? err.message : 'Could not verify Google account.'
+              );
+            } finally {
+              setLoading(false);
+            }
+          },
+          ux_mode: 'popup',
+        });
+
+        googleBtnRef.current.innerHTML = '';
+        const btnWidth = Math.min(384, Math.max(240, googleBtnRef.current.clientWidth || 340));
+        window.google.accounts.id.renderButton(googleBtnRef.current, {
+          theme: 'outline',
+          size: 'large',
+          text: mode === 'signup' ? 'signup_with' : 'continue_with',
+          shape: 'rectangular',
+          width: btnWidth,
+          logo_alignment: 'center',
+        });
+        setGisReady(true);
+      } catch (err) {
+        console.warn('Google GIS button setup fallback:', err);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeGoogleClientId, mode, onLoginSuccess, onNavigate]);
+
   const handleGoogleAuth = async () => {
     setErrorMessage(null);
 
-    // 1. Prefer popup-free server-side Google OAuth 2.0 when GOOGLE_CLIENT_ID & SECRET are configured
+    // 1. Prefer Google Identity Services OAuth2 token client directly on user click (uses registered javascript_origins)
+    if (window.google?.accounts?.oauth2) {
+      setLoading(true);
+      try {
+        const tokenClient = window.google.accounts.oauth2.initTokenClient({
+          client_id: activeGoogleClientId,
+          scope: 'openid email profile',
+          callback: async (tokenResp) => {
+            if (tokenResp.error || !tokenResp.access_token) {
+              setLoading(false);
+              setErrorMessage(
+                tokenResp.error_description ||
+                  `Google Sign-In was cancelled or blocked (${tokenResp.error || 'access_denied'}).`
+              );
+              return;
+            }
+            try {
+              const selectedRole = roleRef.current;
+              const { user, token } = await verifyGoogleCredentialWithServer({
+                accessToken: tokenResp.access_token,
+                role: selectedRole,
+              });
+              setSuccessNotice(
+                modeRef.current === 'signup'
+                  ? `Account created! Welcome to Haggle, ${user.name}.`
+                  : `Signed in successfully as ${user.email}!`
+              );
+              setTimeout(() => {
+                onLoginSuccess(user, token);
+                onNavigate(selectedRole === 'maker' ? { view: 'seller' } : { view: 'catalog' });
+              }, 350);
+            } catch (err: unknown) {
+              setErrorMessage(
+                err instanceof Error ? err.message : 'Google token verification failed.'
+              );
+            } finally {
+              setLoading(false);
+            }
+          },
+          error_callback: (err) => {
+            setLoading(false);
+            if (err?.type === 'popup_failed_to_open' && providers?.directGoogleEnabled) {
+              const returnTo = roleRef.current === 'maker' ? '/seller' : '/';
+              window.location.assign(
+                `/api/auth/google?role=${encodeURIComponent(roleRef.current)}&mode=${encodeURIComponent(modeRef.current)}&returnTo=${encodeURIComponent(returnTo)}`
+              );
+              return;
+            }
+            setErrorMessage(
+              err?.message || 'Google Sign-In popup closed before completing. Please try again.'
+            );
+          },
+        });
+        tokenClient.requestAccessToken({ prompt: 'select_account' });
+        return;
+      } catch {
+        setLoading(false);
+      }
+    }
+
+    // 2. Full-page Google OAuth 2.0 redirect when direct server credentials are available
     if (providers?.directGoogleEnabled) {
       setLoading(true);
       const returnTo = role === 'maker' ? '/seller' : '/';
@@ -93,7 +234,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       return;
     }
 
-    // 2. Otherwise use Firebase Google Sign-In (with automatic redirect fallback if popup blocked)
+    // 3. Fallback to Firebase Auth popup / redirect
     try {
       setLoading(true);
       try {
@@ -105,7 +246,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       const credential = await signInWithPopup(auth, googleAuthProvider);
       const token = await credential.user.getIdToken();
 
-      // Sync user profile to backend Cloud SQL / store
       try {
         await fetch('/api/auth/sync', {
           method: 'POST',
@@ -151,26 +291,20 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       }
 
       console.error('Google Auth error:', err);
-      const currentHost = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
-      const callbackUrl =
-        providers?.redirectUri ||
-        (typeof window !== 'undefined' ? `${window.location.origin}/api/auth/google/callback` : '/api/auth/google/callback');
-
+      const currentOrigin = typeof window !== 'undefined' ? window.location.origin : 'this domain';
       if (code === 'auth/unauthorized-domain') {
         setErrorMessage(
-          `Domain "${currentHost}" is not authorized yet in Firebase project "${activeFirebaseProjectId}". Add "${currentHost}" to Firebase Authorized Domains (or add GOOGLE_CLIENT_ID & GOOGLE_CLIENT_SECRET with redirect URI "${callbackUrl}").`
+          `Add "${currentOrigin}" to Google Cloud Authorized JavaScript Origins (or use https://haggle-six.vercel.app) — Firebase project "${activeFirebaseProjectId}" has not authorized this domain.`
         );
       } else if (code === 'auth/popup-blocked') {
         setErrorMessage(
-          'Google popup was blocked by your browser. Please allow popups for this site or configure direct Google OAuth.'
+          'Google popup was blocked by your browser. Please allow popups for this site and try again.'
         );
       } else if (code === 'auth/popup-closed-by-user') {
-        setErrorMessage(
-          'Google sign-in popup was closed before finishing. Please try again.'
-        );
+        setErrorMessage('Google sign-in popup was closed before finishing. Please try again.');
       } else {
         setErrorMessage(
-          `Google Sign-In could not complete (${code || 'unknown error'}). Verify Firebase Authorized Domains for "${currentHost}" or configure GOOGLE_CLIENT_ID & GOOGLE_CLIENT_SECRET.`
+          `Google Sign-In could not complete (${code || 'blocked'}). Verify "${currentOrigin}" is authorized in Google Cloud Console.`
         );
       }
     } finally {
@@ -409,33 +543,41 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
           {/* Third-Party Fast Auth */}
           <div className="space-y-2.5">
-            {/* Google */}
-            <button
-              type="button"
-              disabled={loading}
-              onClick={handleGoogleAuth}
-              className="w-full py-2.5 px-4 rounded-xl border border-[#D5CBBF] hover:border-[#1E1B18] bg-white text-[#1E1B18] text-xs sm:text-sm font-semibold flex items-center justify-center gap-2.5 transition-colors cursor-pointer shadow-xs disabled:opacity-60"
-            >
-              <svg className="w-4 h-4" viewBox="0 0 24 24">
-                <path
-                  fill="#4285F4"
-                  d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.8-2.4 3.65v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.14z"
-                />
-                <path
-                  fill="#34A853"
-                  d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.33 24 12 24z"
-                />
-                <path
-                  fill="#FBBC05"
-                  d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.17 0 9.99 0 12s.45 3.83 1.25 5.42l4.03-3.15z"
-                />
-                <path
-                  fill="#EA4335"
-                  d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
-                />
-              </svg>
-              <span>{mode === 'signup' ? 'Sign up with Google' : 'Continue with Google'}</span>
-            </button>
+            {/* Official Google Identity Services Button (automatically renders when GSI loads) */}
+            <div
+              ref={googleBtnRef}
+              className={gisReady ? 'w-full flex justify-center min-h-[44px]' : 'hidden'}
+            />
+
+            {/* Fallback Google Button (used before GSI loads or if OAuth2 token/redirect flow is active) */}
+            {!gisReady && (
+              <button
+                type="button"
+                disabled={loading}
+                onClick={handleGoogleAuth}
+                className="w-full py-2.5 px-4 rounded-xl border border-[#D5CBBF] hover:border-[#1E1B18] bg-white text-[#1E1B18] text-xs sm:text-sm font-semibold flex items-center justify-center gap-2.5 transition-colors cursor-pointer shadow-xs disabled:opacity-60"
+              >
+                <svg className="w-4 h-4" viewBox="0 0 24 24">
+                  <path
+                    fill="#4285F4"
+                    d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.8-2.4 3.65v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.14z"
+                  />
+                  <path
+                    fill="#34A853"
+                    d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.33 24 12 24z"
+                  />
+                  <path
+                    fill="#FBBC05"
+                    d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.17 0 9.99 0 12s.45 3.83 1.25 5.42l4.03-3.15z"
+                  />
+                  <path
+                    fill="#EA4335"
+                    d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
+                  />
+                </svg>
+                <span>{mode === 'signup' ? 'Sign up with Google' : 'Continue with Google'}</span>
+              </button>
+            )}
 
             {/* PayPal for Shoppers */}
             {role === 'shopper' && (

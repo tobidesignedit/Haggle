@@ -176,13 +176,22 @@ test('15-minute deal expiry and atomic stock decrement with idempotent capture',
 test('PayPal Orders v2 repository flow preserves liveSandboxOrderId and confirms capture idempotently', async () => {
   const {
     getSellerItemById,
+    updateSellerItemInDb,
     lockCounterOfferOnDeal,
     createPayPalOrderInDb,
     captureAndConfirmWebhookInDb,
   } = await import('../db/repository');
 
-  const item = await getSellerItemById('item-cognac-boot');
+  let item = await getSellerItemById('item-cognac-boot');
   assert.ok(item, 'Seeded item-cognac-boot should load');
+  if (item.stock < 1) {
+    const restocked = await updateSellerItemInDb(item.id, {
+      askingPrice: item.askingPrice,
+      floorPrice: item.floorPrice,
+      stock: 6,
+    });
+    if (restocked) item = restocked;
+  }
   const initialStock = item.stock;
 
   const sessionId = `test-paypal-${Date.now()}`;

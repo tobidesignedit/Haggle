@@ -153,8 +153,10 @@ export default function App() {
   useEffect(() => {
     const path = window.location.pathname;
     const params = new URLSearchParams(window.location.search);
-    const authError = params.get('auth_error');
+    const authError = params.get('auth_error') || params.get('error');
     const authProvider = params.get('auth_provider');
+    const oauthCode = params.get('code');
+    const oauthState = params.get('state');
 
     if (authError) {
       setInitialAuthError(authError);
@@ -170,11 +172,46 @@ export default function App() {
       if (id) setRoute({ view: 'bargain', itemId: id });
     }
 
-    if (authError || authProvider) {
-      params.delete('auth_error');
-      params.delete('auth_provider');
+    if (authError || authProvider || oauthCode || oauthState) {
+      for (const k of ['auth_error', 'error', 'auth_provider', 'code', 'state', 'scope', 'authuser', 'prompt']) {
+        params.delete(k);
+      }
       const cleanedSearch = params.toString();
       window.history.replaceState({}, '', `${path}${cleanedSearch ? `?${cleanedSearch}` : ''}`);
+    }
+
+    // Complete root-origin Google OAuth 2.0 redirect code exchange if ?code=&state= returned
+    if (oauthCode && oauthState && !authError) {
+      fetch('/api/auth/google/exchange', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: oauthCode, state: oauthState }),
+      })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (data?.authenticated && data.user) {
+            const profile: AuthUserProfile = {
+              email: data.user.email,
+              name: data.user.name,
+              role: data.user.role === 'maker' ? 'maker' : 'shopper',
+              photoUrl: data.user.photoUrl,
+            };
+            handleLoginSuccess(profile, data.token || undefined);
+            if (profile.role === 'maker' || String(data.returnTo || '').startsWith('/seller')) {
+              setRoute({ view: 'seller' });
+            } else {
+              setRoute({ view: 'catalog' });
+            }
+          } else {
+            setInitialAuthError('token_exchange_failed');
+            setRoute({ view: 'login', initialMode: 'signin' });
+          }
+        })
+        .catch(() => {
+          setInitialAuthError('oauth_callback_error');
+          setRoute({ view: 'login', initialMode: 'signin' });
+        });
+      return;
     }
 
     // Restore Google OAuth session cookie from server
