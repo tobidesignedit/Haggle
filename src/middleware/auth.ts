@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from 'express';
-import { adminAuth } from '../lib/firebase-admin';
+import { verifyFirebaseIdToken } from '../lib/firebase-admin';
 import {
   parseCookies,
   verifySignedToken,
@@ -38,18 +38,8 @@ async function resolveAuthenticatedUser(req: Request): Promise<AuthUser | null> 
       };
     }
 
-    // 1b. Fall back to Firebase Admin verification
-    try {
-      const decodedToken = await adminAuth.verifyIdToken(bearerToken);
-      return {
-        uid: decodedToken.uid,
-        email: decodedToken.email,
-        name: typeof decodedToken.name === 'string' ? decodedToken.name : undefined,
-        picture: decodedToken.picture,
-      };
-    } catch {
-      return null;
-    }
+    // 1b. Fall back to Firebase ID token verification (lazy-loaded / Identity Toolkit safe)
+    return verifyFirebaseIdToken(bearerToken);
   }
 
   // 2. Check HttpOnly session cookie (used by Google OAuth 2.0 redirect flow)

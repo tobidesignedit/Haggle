@@ -4,15 +4,15 @@
   "outputDirectory": "dist",
   "rewrites": [
     {
-      "source": "/__/auth/(.*)",
-      "destination": "https://igneous-empire-8bvhw.firebaseapp.com/__/auth/$1"
+      "source": "/__/auth/:path*",
+      "destination": "https://igneous-empire-8bvhw.firebaseapp.com/__/auth/:path*"
     },
     {
-      "source": "/api/(.*)",
-      "destination": "/api/index?__path=$1"
+      "source": "/api/:path*",
+      "destination": "/api/index?__path=:path*"
     },
     {
-      "source": "/((?!api/|__/auth/|assets/|src/assets/|favicon\\.svg|favicon\\.ico).*)",
+      "source": "/((?!api/|__/auth/|assets/|src/assets/|favicon).*)",
       "destination": "/index.html"
     }
   ]

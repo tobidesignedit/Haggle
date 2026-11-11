@@ -44,8 +44,10 @@ import {
   type SessionUser,
 } from './src/lib/oauthSession';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __filename =
+  typeof import.meta?.url === 'string' ? fileURLToPath(import.meta.url) : process.cwd();
+const __dirname =
+  typeof import.meta?.url === 'string' ? path.dirname(__filename) : process.cwd();
 
 const PAYPAL_API_BASE =
   process.env.PAYPAL_ENV === 'live'
@@ -182,20 +184,23 @@ export function createApiApp(): Express {
   app.use(express.json({ limit: '20mb' }));
   app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
-  // Normalize URL prefix for serverless rewrites (e.g. Vercel /api/* -> /api/index?__path=$1)
+  // Normalize URL prefix for serverless rewrites (e.g. Vercel /api/:path* -> /api/index?__path=:path*)
   app.use((req, _res, next) => {
-    // 1. Check if Vercel forwarded subpath in query (__path or 0 or path)
-    const rawQueryPath =
-      (req.query?.__path as string) ||
-      (req.query?.['0'] as string) ||
-      (Array.isArray(req.query?.path) ? (req.query.path as string[]).join('/') : (req.query?.path as string));
+    // 1. Check if Vercel forwarded subpath in query (__path, 0, or catch-all path)
+    const rawCandidate = req.query?.__path ?? req.query?.['0'] ?? req.query?.path;
+    const rawQueryPath = Array.isArray(rawCandidate)
+      ? rawCandidate.map(String).join('/')
+      : typeof rawCandidate === 'string'
+        ? rawCandidate
+        : '';
 
-    if (rawQueryPath) {
-      const cleanPath = String(rawQueryPath).replace(/^\/+/, '');
+    if (rawQueryPath && (!req.url.startsWith('/api/') || req.url.startsWith('/api/index'))) {
+      const cleanPath = rawQueryPath.replace(/^\/+/, '');
       const urlObj = new URL(req.url, 'http://localhost');
       urlObj.pathname = `/api/${cleanPath}`;
       urlObj.searchParams.delete('__path');
       urlObj.searchParams.delete('0');
+      urlObj.searchParams.delete('path');
       req.url = `${urlObj.pathname}${urlObj.search}`;
     } else if (req.url.startsWith('/api/index')) {
       // 2. If Vercel rewrote to /api/index or /api/index/...
@@ -1303,9 +1308,10 @@ async function startLocalServer() {
 }
 
 const isMainModule =
+  typeof import.meta?.url === 'string' &&
   Boolean(process.argv[1]) &&
   path.resolve(process.argv[1]) === path.resolve(__filename);
 
-if (isMainModule && !process.env.VERCEL) {
+if (isMainModule && !process.env.VERCEL && !process.env.VERCEL_ENV && !process.env.AWS_LAMBDA_FUNCTION_NAME) {
   startLocalServer();
 }
